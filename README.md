@@ -1,5 +1,5 @@
 English | [简体中文](README_CN.md)
 
-# kube-pod-migration
+# PodMig - Kubernetes [Pod Mig](.)ration tool
 
-[Kubernetes](https://kubernetes.io/) pod migration tool. Live migrate a running pod from one node to another without killing.
+[Kubernetes](https://kubernetes.io/) Pod Migration tool. Live migrate a running pod from one node to another without killing.
