@@ -1,4 +1,4 @@
-package cmd
+package cmdutil
 
 import (
 	"github.com/bombsimon/logrusr/v4"

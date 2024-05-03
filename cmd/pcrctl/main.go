@@ -6,7 +6,7 @@ import (
 	"syscall"
 
 	"github.com/yhlooo/podmig/pkg/commands/pcrctl"
-	ctxutil "github.com/yhlooo/podmig/pkg/utils/context"
+	"github.com/yhlooo/podmig/pkg/utils/ctxutil"
 )
 
 // Version 版本号

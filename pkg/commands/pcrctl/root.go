@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/yhlooo/podmig/pkg/commands/pcrctl/options"
-	cmdutil "github.com/yhlooo/podmig/pkg/utils/cmd"
+	"github.com/yhlooo/podmig/pkg/utils/cmdutil"
 )
 
 // NewRootCommand 创建一个 pcrctl 命令
