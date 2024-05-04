@@ -11,6 +11,7 @@ func NewDefaultCheckpointOptions() CheckpointOptions {
 		ContainerRuntime:         "containerd",
 		ContainerRuntimeEndpoint: "unix:///run/containerd/containerd.sock",
 		ExportFile:               "",
+		RetainCheckpointImages:   false,
 	}
 }
 
@@ -24,6 +25,8 @@ type CheckpointOptions struct {
 	ContainerRuntimeEndpoint string `json:"containerRuntimeEndpoint,omitempty" yaml:"containerRuntimeEndpoint,omitempty"`
 	// 检查点导出目录
 	ExportFile string `json:"exportFile,omitempty" yaml:"exportFile,omitempty"`
+	// 导出后容器检查点后保留检查点镜像
+	RetainCheckpointImages bool `json:"retainCheckpointImages,omitempty" yaml:"retainCheckpointImages,omitempty"`
 }
 
 // AddPFlags 将选项绑定到命令行参数
@@ -32,4 +35,8 @@ func (o *CheckpointOptions) AddPFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&o.ContainerRuntime, "runtime", o.ContainerRuntime, "Container runtime")
 	flags.StringVar(&o.ContainerRuntimeEndpoint, "endpoint", o.ContainerRuntimeEndpoint, "Container runtime endpoint")
 	flags.StringVar(&o.ExportFile, "export", o.ExportFile, "Tar file to export checkpoint")
+	flags.BoolVar(
+		&o.RetainCheckpointImages, "retain-checkpoint-images", o.RetainCheckpointImages,
+		"Retain checkpoint images after export",
+	)
 }

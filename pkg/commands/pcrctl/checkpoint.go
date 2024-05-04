@@ -39,6 +39,14 @@ func NewCheckpointCommandWithOptions(opts *options.CheckpointOptions) *cobra.Com
 				exportFile = fmt.Sprintf("%s_%s_checkpoint_%s.tar.gz", podNS, podName, checkpointID)
 			}
 
+			// 准备临时文件目录
+			tmpdir := exportFile + ".tmp"
+			if err := os.Mkdir(tmpdir, 0755); err != nil {
+				return fmt.Errorf("make temp dir %q error: %w", tmpdir, err)
+			}
+			defer func() { _ = os.RemoveAll(tmpdir) }()
+
+			// 打开导出 tar 文件
 			file, err := os.Create(exportFile)
 			if err != nil {
 				return fmt.Errorf("failed to create export file %q: %w", exportFile, err)
@@ -57,15 +65,17 @@ func NewCheckpointCommandWithOptions(opts *options.CheckpointOptions) *cobra.Com
 				}
 			}()
 
+			// 准备检查点管理器
 			var mgr podcrcommon.PodCRManager
 			switch opts.ContainerRuntime {
 			case "containerd":
-				mgr, err = podcrcontianerd.New(opts.ContainerRuntimeEndpoint, exportFile+".tmp")
+				mgr, err = podcrcontianerd.New(opts.ContainerRuntimeEndpoint, tmpdir, opts.RetainCheckpointImages)
 			}
 			if err != nil {
 				return fmt.Errorf("create pod checkpoint manager error: %w", err)
 			}
 
+			// 建立检查点
 			if err := mgr.Checkpoint(ctx, checkpointID, podNS, podName, tw); err != nil {
 				return err
 			}

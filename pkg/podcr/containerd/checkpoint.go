@@ -28,25 +28,27 @@ func (h *Manager) Checkpoint(ctx context.Context, checkpointID, namespace, name 
 	}()
 
 	return (&Checkpoint{
-		tmpdir:           tmpdir,
-		criClient:        h.criClient,
-		containerdClient: h.containerdClient,
-		checkpointID:     checkpointID,
-		namespace:        namespace,
-		name:             name,
-		tw:               tw,
+		tmpdir:                 tmpdir,
+		criClient:              h.criClient,
+		containerdClient:       h.containerdClient,
+		retainCheckpointImages: h.retainCheckpointImages,
+		checkpointID:           checkpointID,
+		namespace:              namespace,
+		name:                   name,
+		tw:                     tw,
 	}).Do(ctx)
 }
 
-// Checkpoint Pod 检查点
+// Checkpoint 建立 Pod 检查点
 type Checkpoint struct {
-	tmpdir           string
-	criClient        criapis.RuntimeService
-	containerdClient *containerd.Client
-	checkpointID     string
-	namespace        string
-	name             string
-	tw               *tar.Writer
+	tmpdir                 string
+	criClient              criapis.RuntimeService
+	containerdClient       *containerd.Client
+	retainCheckpointImages bool
+	checkpointID           string
+	namespace              string
+	name                   string
+	tw                     *tar.Writer
 
 	sandboxID  string
 	containers []*runtimev1.Container
@@ -78,6 +80,7 @@ func (c *Checkpoint) Do(ctx context.Context) error {
 	for i := len(c.containers) - 1; i >= 0; i-- {
 		cName := c.containers[i].Metadata.GetName()
 		// 创建容器检查点
+		logger.Info(fmt.Sprintf("checkpoint container %q", cName))
 		checkpointImage, err := c.checkpointContainer(ctx, c.containers[i])
 		if err != nil {
 			return fmt.Errorf("checkpoint container %q for pod %q error: %w", cName, podKey, err)
@@ -238,6 +241,13 @@ func (c *Checkpoint) exportContainerCheckpoint(ctx context.Context, containerNam
 		return fmt.Errorf("copy checkpoint %q exported file %q to tar error: %w", checkpointImageName, tmpfile, err)
 	}
 
+	// 删除检查点镜像
+	if !c.retainCheckpointImages {
+		if err := c.containerdClient.ImageService().Delete(ctx, checkpointImageName); err != nil {
+			return fmt.Errorf("delete checkpoint image %q error: %w", checkpointImageName, err)
+		}
+	}
+
 	return nil
 }
 
@@ -248,5 +258,5 @@ func (c *Checkpoint) getContainerCheckpointImageName(containerName string) strin
 
 // getContainerCheckpointImageName 获取容器检查点镜像导出文件名
 func (c *Checkpoint) getContainerCheckpointImageTarName(containerName string) string {
-	return "container_" + containerName + ".tar"
+	return containerCheckpointTarNamePrefix + containerName + ".tar"
 }

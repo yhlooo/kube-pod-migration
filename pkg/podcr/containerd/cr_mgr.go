@@ -14,22 +14,24 @@ import (
 )
 
 const (
-	defaultCRIConnectionTimeout = 2 * time.Second
-	defaultContainerdNamespace  = "k8s.io"
-	sandboxConfigJSONName       = "sandbox_config.json"
+	defaultCRIConnectionTimeout      = 2 * time.Second
+	defaultContainerdNamespace       = "k8s.io"
+	sandboxConfigJSONName            = "sandbox_config.json"
+	containerCheckpointTarNamePrefix = "container_"
 )
 
 // Manager 基于 containerd 的 common.PodCRManager 的实现
 type Manager struct {
-	tmpdir           string
-	criClient        criapis.RuntimeService
-	containerdClient *containerd.Client
+	tmpdir                 string
+	criClient              criapis.RuntimeService
+	containerdClient       *containerd.Client
+	retainCheckpointImages bool
 }
 
 var _ common.PodCRManager = &Manager{}
 
 // New 创建一个 *Manager
-func New(endpoint, tmpdir string) (*Manager, error) {
+func New(endpoint, tmpdir string, retainCheckpointImages bool) (*Manager, error) {
 	criClient, err := getCRIClient(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("create cri client error: %w", err)
@@ -40,9 +42,10 @@ func New(endpoint, tmpdir string) (*Manager, error) {
 	}
 
 	return &Manager{
-		criClient:        criClient,
-		containerdClient: containerdClient,
-		tmpdir:           tmpdir,
+		criClient:              criClient,
+		containerdClient:       containerdClient,
+		tmpdir:                 tmpdir,
+		retainCheckpointImages: retainCheckpointImages,
 	}, nil
 }
 
