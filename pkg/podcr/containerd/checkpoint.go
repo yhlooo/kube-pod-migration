@@ -3,6 +3,7 @@ package containerd
 import (
 	"archive/tar"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -96,6 +97,11 @@ func (c *Checkpoint) Do(ctx context.Context) error {
 	return nil
 }
 
+// sandboxInfo runtimev1.PodSandboxStatusResponse.Info["info"] 的部分结构，用于 JSON 反序列化
+type sandboxInfo struct {
+	Config *runtimev1.PodSandboxConfig `json:"config,omitempty"`
+}
+
 // exportPodSandbox 导出 Pod 沙盒
 func (c *Checkpoint) exportPodSandbox(ctx context.Context) error {
 	podKey := c.namespace + "/" + c.name
@@ -123,23 +129,18 @@ func (c *Checkpoint) exportPodSandbox(ctx context.Context) error {
 
 	c.sandboxID = baseInfo.Id
 
+	// 获取 Pod 沙盒详细配置
+	resp, err := c.criClient.PodSandboxStatus(ctx, c.sandboxID, true)
+	if err != nil {
+		return err
+	}
+	var respData sandboxInfo
+	if err := json.Unmarshal([]byte(resp.Info["info"]), &respData); err != nil {
+		return fmt.Errorf("unmarshal sandbox info from json error: %w", err)
+	}
+
 	// 写 Pod 沙盒配置
-	if err := tarutil.WriteJSON(c.tw, sandboxConfigJSONName, 0644, &runtimev1.PodSandboxConfig{
-		Metadata:     baseInfo.Metadata,
-		Hostname:     "",  // TODO: ...
-		LogDirectory: "",  // TODO: ...
-		DnsConfig:    nil, // TODO: ...
-		PortMappings: nil, // TODO: ...
-		Labels:       baseInfo.Labels,
-		Annotations:  baseInfo.Annotations,
-		Linux: &runtimev1.LinuxPodSandboxConfig{ // TODO: ...
-			CgroupParent:    "",
-			SecurityContext: nil,
-			Sysctls:         nil,
-			Overhead:        nil,
-			Resources:       nil,
-		},
-	}); err != nil {
+	if err := tarutil.WriteJSON(c.tw, sandboxConfigJSONName, 0644, respData.Config); err != nil {
 		return fmt.Errorf("write sandbox config to tar error: %w", err)
 	}
 
