@@ -9,6 +9,7 @@ import (
 const (
 	AlphaLower = "abcdefghijklmnopqrstuvwxyz"
 	Numeric    = "0123456789"
+	HexNumeric = "0123456789abcdef"
 )
 
 // Rand 随机数生成器
@@ -41,4 +42,9 @@ func (r *Rand) CharN(letters string, n int) string {
 // LowerAlphaNumN 返回包含 n 个随机小写字母和数字的字符串
 func (r *Rand) LowerAlphaNumN(n int) string {
 	return r.CharN(AlphaLower+Numeric, n)
+}
+
+// HexN 返回包含 n 个随机字符的合法的 16 进制整数形式的字符串
+func (r *Rand) HexN(n int) string {
+	return r.CharN(HexNumeric, n)
 }

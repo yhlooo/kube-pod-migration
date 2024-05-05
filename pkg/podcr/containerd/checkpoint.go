@@ -97,11 +97,6 @@ func (c *Checkpoint) Do(ctx context.Context) error {
 	return nil
 }
 
-// sandboxInfo runtimev1.PodSandboxStatusResponse.Info["info"] 的部分结构，用于 JSON 反序列化
-type sandboxInfo struct {
-	Config *runtimev1.PodSandboxConfig `json:"config,omitempty"`
-}
-
 // exportPodSandbox 导出 Pod 沙盒
 func (c *Checkpoint) exportPodSandbox(ctx context.Context) error {
 	podKey := c.namespace + "/" + c.name
@@ -134,7 +129,7 @@ func (c *Checkpoint) exportPodSandbox(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var respData sandboxInfo
+	var respData SandboxInfo
 	if err := json.Unmarshal([]byte(resp.Info["info"]), &respData); err != nil {
 		return fmt.Errorf("unmarshal sandbox info from json error: %w", err)
 	}

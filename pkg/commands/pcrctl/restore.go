@@ -30,28 +30,31 @@ func NewRestoreCommandWithOptions(opts *options.RestoreOptions) *cobra.Command {
 			ctx := cmd.Context()
 			logger := logr.FromContextOrDiscard(ctx)
 
-			checkpointTar := args[0]
-			file, err := os.Open(checkpointTar)
+			// 打开导入 tar 文件
+			importFile := args[0]
+			file, err := os.Open(importFile)
 			if err != nil {
-				return fmt.Errorf("open checkpoint tar file %q error: %w", checkpointTar, err)
+				return fmt.Errorf("open import file %q error: %w", importFile, err)
 			}
 			defer func() { _ = file.Close() }()
 			gzipR, err := gzip.NewReader(file)
 			if err != nil {
-				return fmt.Errorf("open gzip reader for checkpoint tar file %q error: %w", checkpointTar, err)
+				return fmt.Errorf("open gzip reader for import file %q error: %w", importFile, err)
 			}
 			defer func() { _ = gzipR.Close() }()
 			tr := tar.NewReader(gzipR)
 
+			// 准备还原管理器
 			var mgr podcrcommon.PodCRManager
 			switch opts.ContainerRuntime {
 			case "containerd":
-				mgr, err = podcrcontianerd.New(opts.ContainerRuntimeEndpoint, "")
+				mgr, err = podcrcontianerd.New(opts.ContainerRuntimeEndpoint, "", false)
 			}
 			if err != nil {
 				return fmt.Errorf("create pod restore manager error: %w", err)
 			}
 
+			// 还原到检查点
 			if err := mgr.Restore(ctx, tr); err != nil {
 				return err
 			}
