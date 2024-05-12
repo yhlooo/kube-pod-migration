@@ -5,13 +5,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/images/archive"
+	"github.com/containerd/typeurl/v2"
 	"github.com/go-logr/logr"
+	ociruntime "github.com/opencontainers/runtime-spec/specs-go"
 	criapis "k8s.io/cri-api/pkg/apis"
 	runtimev1 "k8s.io/cri-api/pkg/apis/runtime/v1"
 
@@ -51,8 +54,8 @@ type Checkpoint struct {
 	name                   string
 	tw                     *tar.Writer
 
-	sandboxID  string
-	containers []*runtimev1.Container
+	sandboxInfo *SandboxInfo
+	containers  []*runtimev1.Container
 }
 
 // Do 执行建立 Pod 检查点操作
@@ -65,7 +68,7 @@ func (c *Checkpoint) Do(ctx context.Context) error {
 	if err := c.exportPodSandbox(ctx); err != nil {
 		return fmt.Errorf("export pod sandbox %q error: %w", podKey, err)
 	}
-	logger.Info(fmt.Sprintf("pod sandbox: %s", c.sandboxID[:13]))
+	logger.Info(fmt.Sprintf("pod sandbox: %s", c.sandboxInfo.ID[:13]))
 
 	// 导出容器基础信息
 	if err := c.exportContainersInfo(ctx); err != nil {
@@ -92,6 +95,11 @@ func (c *Checkpoint) Do(ctx context.Context) error {
 		if err := c.exportContainerCheckpoint(ctx, cName, checkpointImage.Name()); err != nil {
 			return fmt.Errorf("export container %q checkpoint for pod %q error: %w", cName, podKey, err)
 		}
+	}
+
+	// 导出 kubelet Pod 目录
+	if err := c.exportKubeletPodDir(ctx); err != nil {
+		return fmt.Errorf("export kubelet pod dir error: %w", err)
 	}
 
 	return nil
@@ -122,31 +130,83 @@ func (c *Checkpoint) exportPodSandbox(ctx context.Context) error {
 	}
 	baseInfo := sandboxes[0]
 
-	c.sandboxID = baseInfo.Id
-
 	// 获取 Pod 沙盒详细配置
-	resp, err := c.criClient.PodSandboxStatus(ctx, c.sandboxID, true)
+	resp, err := c.criClient.PodSandboxStatus(ctx, baseInfo.Id, true)
 	if err != nil {
 		return err
 	}
-	var respData SandboxInfo
-	if err := json.Unmarshal([]byte(resp.Info["info"]), &respData); err != nil {
+	c.sandboxInfo = &SandboxInfo{}
+	if err := json.Unmarshal([]byte(resp.Info["info"]), c.sandboxInfo); err != nil {
 		return fmt.Errorf("unmarshal sandbox info from json error: %w", err)
 	}
 
 	// 写 Pod 沙盒配置
-	if err := tarutil.WriteJSON(c.tw, sandboxConfigJSONName, 0644, respData.Config); err != nil {
+	c.sandboxInfo.ID = baseInfo.Id
+	if err := tarutil.WriteJSON(c.tw, sandboxInfoJSONName, 0644, c.sandboxInfo); err != nil {
 		return fmt.Errorf("write sandbox config to tar error: %w", err)
 	}
 
 	return nil
 }
 
+// exportKubeletPodDir 导出 kubelet Pod 目录
+func (c *Checkpoint) exportKubeletPodDir(ctx context.Context) error {
+	logger := logr.FromContextOrDiscard(ctx)
+
+	// 获取 kubelet Pod 导出目录
+	kubeletPodDir, err := c.getKubeletPodDir(ctx)
+	if err != nil {
+		return err
+	}
+	logger.Info(fmt.Sprintf("exporting kubelet pod directory: %s", kubeletPodDir))
+
+	// 将 Pod 数据目录全部打包
+	return filepath.Walk(kubeletPodDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// 获取软链目标
+		link := path
+		isSymlink := info.Mode()&os.ModeSymlink != 0
+		if isSymlink {
+			link, err = os.Readlink(path)
+			if err != nil {
+				return fmt.Errorf("read link %q error: %w", path, err)
+			}
+		}
+
+		// 写文件头
+		hdr, err := tar.FileInfoHeader(info, link)
+		if err != nil {
+			return fmt.Errorf("get tar header %q error: %w", path, err)
+		}
+		hdr.Name = kubeletPodDirTarNamePrefix + path
+		if err := c.tw.WriteHeader(hdr); err != nil {
+			return fmt.Errorf("write tar header %q error: %w", path, err)
+		}
+		if info.IsDir() || isSymlink {
+			return nil
+		}
+
+		// 写文件内容
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("open file %q error: %w", path, err)
+		}
+		defer func() { _ = f.Close() }()
+		if _, err := io.Copy(c.tw, f); err != nil {
+			return fmt.Errorf("copy file %q to tar error: %w", path, err)
+		}
+		return nil
+	})
+}
+
 // exportContainersInfo 导出容器基础信息
 func (c *Checkpoint) exportContainersInfo(ctx context.Context) error {
 	var err error
 	c.containers, err = c.criClient.ListContainers(ctx, &runtimev1.ContainerFilter{
-		PodSandboxId: c.sandboxID,
+		PodSandboxId: c.sandboxInfo.ID,
 	})
 	if err != nil {
 		return err
@@ -245,6 +305,33 @@ func (c *Checkpoint) exportContainerCheckpoint(ctx context.Context, containerNam
 	}
 
 	return nil
+}
+
+// getKubeletPodDir 获取 kubelet Pod 数据目录
+func (c *Checkpoint) getKubeletPodDir(ctx context.Context) (string, error) {
+	// 默认目录
+	defaultKubeletPodDir := filepath.Join(kubeletPodsDir, c.sandboxInfo.Config.Metadata.Uid)
+
+	if len(c.containers) == 0 {
+		return defaultKubeletPodDir, nil
+	}
+
+	container, err := c.containerdClient.ContainerService().Get(ctx, c.containers[0].Id)
+	if err != nil {
+		return "", fmt.Errorf("get container %q info error: %w", c.containers[0].Id, err)
+	}
+	cSpec := &ociruntime.Spec{}
+	if err := typeurl.UnmarshalTo(container.Spec, cSpec); err != nil {
+		return "", fmt.Errorf("unmarshal container %q info error: %w", c.containers[0].Id, err)
+	}
+	for _, mount := range cSpec.Mounts {
+		if mount.Destination == "/etc/hosts" {
+			// 使用 hosts 文件挂载路径推断 Pod 目录
+			return filepath.Dir(mount.Source), nil
+		}
+	}
+
+	return defaultKubeletPodDir, nil
 }
 
 // getContainerCheckpointImageName 获取容器检查点镜像名

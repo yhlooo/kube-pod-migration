@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -47,10 +48,10 @@ type Restore struct {
 	containerdClient *containerd.Client
 	tr               *tar.Reader
 
-	sandboxConfig             *runtimev1.PodSandboxConfig
-	containerCheckpointImages []images.Image
-	sandboxID                 string
-	sandboxInfo               *SandboxInfo
+	srcSandboxInfo               *SandboxInfo
+	srcContainerCheckpointImages []images.Image
+
+	sandboxInfo *SandboxInfo
 }
 
 // Do 执行从 Pod 检查点还原操作
@@ -69,8 +70,8 @@ func (r *Restore) Do(ctx context.Context) error {
 	}
 
 	// 按照创建检查点的逆序恢复容器
-	for i := len(r.containerCheckpointImages) - 1; i >= 0; i-- {
-		cID, err := r.restoreContainer(ctx, r.containerCheckpointImages[i])
+	for i := len(r.srcContainerCheckpointImages) - 1; i >= 0; i-- {
+		cID, err := r.restoreContainer(ctx, r.srcContainerCheckpointImages[i])
 		if err != nil {
 			return fmt.Errorf("restore container error: %w", err)
 		}
@@ -95,7 +96,7 @@ func (r *Restore) importTar(ctx context.Context) error {
 
 		switch {
 		case strings.HasPrefix(hdr.Name, containerCheckpointTarNamePrefix):
-			logger.Info(fmt.Sprintf("importing checkpoint image from file %q", hdr.Name))
+			logger.Info(fmt.Sprintf("importing checkpoint image from file %q ...", hdr.Name))
 			imgs, err := r.containerdClient.Import(ctx, r.tr)
 			if err != nil {
 				return fmt.Errorf("import checkpoint image from file %q error: %w", hdr.Name, err)
@@ -103,12 +104,45 @@ func (r *Restore) importTar(ctx context.Context) error {
 			for _, imgInfo := range imgs {
 				logger.Info(fmt.Sprintf("imported image: %s", imgInfo.Name))
 			}
-			r.containerCheckpointImages = append(r.containerCheckpointImages, imgs...)
-		case hdr.Name == sandboxConfigJSONName:
-			r.sandboxConfig = &runtimev1.PodSandboxConfig{}
-			if err := tarutil.ReadJSON(r.tr, r.sandboxConfig); err != nil {
+			r.srcContainerCheckpointImages = append(r.srcContainerCheckpointImages, imgs...)
+		case hdr.Name == sandboxInfoJSONName:
+			logger.Info(fmt.Sprintf("importing sandbox info from file %q ...", hdr.Name))
+			r.srcSandboxInfo = &SandboxInfo{}
+			if err := tarutil.ReadJSON(r.tr, r.srcSandboxInfo); err != nil {
 				return fmt.Errorf("read sandbox config from file %q error: %w", hdr.Name, err)
 			}
+		case strings.HasPrefix(hdr.Name, kubeletPodDirTarNamePrefix):
+			// kubelet Pod 数据目录
+			path := strings.TrimPrefix(hdr.Name, kubeletPodDirTarNamePrefix)
+			logger.Info(fmt.Sprintf("importing kubelet pod data file %q ...", path))
+			info := hdr.FileInfo()
+
+			// 目录
+			if info.IsDir() {
+				if err := os.MkdirAll(path, info.Mode()); err != nil {
+					return fmt.Errorf("mkdir %q error: %w", path, err)
+				}
+				continue
+			}
+
+			// 软链
+			if info.Mode()&os.ModeSymlink != 0 {
+				if err := os.Symlink(hdr.Linkname, path); err != nil {
+					return fmt.Errorf("symlink %q -> %q error: %w", path, hdr.Linkname, err)
+				}
+				continue
+			}
+
+			// 普通文件
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
+			if err != nil {
+				return fmt.Errorf("open file %q error: %w", path, err)
+			}
+			if _, err := io.Copy(f, r.tr); err != nil {
+				_ = f.Close()
+				return fmt.Errorf("copy file %q from tar error: %w", path, err)
+			}
+			_ = f.Close()
 		}
 	}
 
@@ -119,12 +153,11 @@ func (r *Restore) importTar(ctx context.Context) error {
 func (r *Restore) restorePodSandbox(ctx context.Context) error {
 	logger := logr.FromContextOrDiscard(ctx)
 
-	var err error
-	r.sandboxID, err = r.criClient.RunPodSandbox(ctx, r.sandboxConfig, "")
+	sandboxID, err := r.criClient.RunPodSandbox(ctx, r.srcSandboxInfo.Config, "")
 	if err != nil {
 		return fmt.Errorf("run pod sandbox error: %w", err)
 	}
-	logger.Info(fmt.Sprintf("restored sandbox: %s", r.sandboxID))
+	logger.Info(fmt.Sprintf("restored sandbox: %s", sandboxID))
 
 	// 等待沙盒就绪
 	for {
@@ -133,7 +166,7 @@ func (r *Restore) restorePodSandbox(ctx context.Context) error {
 			return ctx.Err()
 		case <-time.After(time.Second):
 		}
-		resp, err := r.criClient.PodSandboxStatus(ctx, r.sandboxID, false)
+		resp, err := r.criClient.PodSandboxStatus(ctx, sandboxID, false)
 		if err != nil {
 			return fmt.Errorf("get pod sandbox status error: %w", err)
 		}
@@ -146,7 +179,7 @@ func (r *Restore) restorePodSandbox(ctx context.Context) error {
 	logger.Info("sandbox is ready")
 
 	// 获取沙盒详细信息
-	resp, err := r.criClient.PodSandboxStatus(ctx, r.sandboxID, true)
+	resp, err := r.criClient.PodSandboxStatus(ctx, sandboxID, true)
 	if err != nil {
 		return fmt.Errorf("get pod sandbox status error: %w", err)
 	}
@@ -154,6 +187,7 @@ func (r *Restore) restorePodSandbox(ctx context.Context) error {
 	if err := json.Unmarshal([]byte(resp.Info["info"]), r.sandboxInfo); err != nil {
 		return fmt.Errorf("unmarshal sandbox info from json error: %w", err)
 	}
+	r.sandboxInfo.ID = sandboxID
 
 	return nil
 }
@@ -271,17 +305,29 @@ func (r *Restore) convertContainerCheckpointImage(
 func (r *Restore) convertContainerSpec(ctx context.Context, spec *ociruntime.Spec) {
 	// TODO: ...
 
+	if spec.Annotations[containerAnnoSandboxID] == r.srcSandboxInfo.ID {
+		spec.Annotations[containerAnnoSandboxID] = r.sandboxInfo.ID
+	}
+	for i, mount := range spec.Mounts {
+		switch mount.Destination {
+		case "/etc/hostname", "/etc/resolv.conf", "/dev/shm":
+			spec.Mounts[i].Source = strings.ReplaceAll(mount.Source, r.srcSandboxInfo.ID, r.sandboxInfo.ID)
+		case "/etc/hosts", "/dev/termination-log", "/var/run/secrets/kubernetes.io/serviceaccount":
+		}
+	}
 	if spec.Linux != nil {
-		// 替换 sandbox pid
+		// 替换 /proc/xxx 路径中的 sandbox pid
+		srcProcPath := fmt.Sprintf("/proc/%d", r.srcSandboxInfo.Pid)
+		dstProcPath := fmt.Sprintf("/proc/%d", r.sandboxInfo.Pid)
 		for i, ns := range spec.Linux.Namespaces {
-			if !strings.HasPrefix(ns.Path, "/proc/") {
+			if !strings.HasPrefix(ns.Path, srcProcPath) {
 				continue
 			}
-			divided := strings.SplitN(strings.TrimPrefix(ns.Path, "/proc/"), "/", 2)
-			if len(divided) != 2 {
-				continue
-			}
-			spec.Linux.Namespaces[i].Path = fmt.Sprintf("/proc/%d/%s", r.sandboxInfo.Pid, divided[1])
+			spec.Linux.Namespaces[i].Path = strings.ReplaceAll(
+				ns.Path,
+				srcProcPath,
+				dstProcPath,
+			)
 		}
 	}
 }

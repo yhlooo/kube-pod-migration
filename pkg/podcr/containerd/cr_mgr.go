@@ -16,7 +16,10 @@ import (
 const (
 	defaultCRIConnectionTimeout      = 2 * time.Second
 	defaultContainerdNamespace       = "k8s.io"
-	sandboxConfigJSONName            = "sandbox_config.json"
+	containerAnnoSandboxID           = "io.kubernetes.cri.sandbox-id"
+	kubeletPodsDir                   = "/var/lib/kubelet/pods"
+	kubeletPodDirTarNamePrefix       = "kubelet_pod"
+	sandboxInfoJSONName              = "sandbox_info.json"
 	containerCheckpointTarNamePrefix = "container_"
 )
 
