@@ -17,6 +17,8 @@ const (
 	defaultCRIConnectionTimeout      = 2 * time.Second
 	defaultContainerdNamespace       = "k8s.io"
 	containerAnnoSandboxID           = "io.kubernetes.cri.sandbox-id"
+	containerAnnoSandboxUID          = "io.kubernetes.cri.sandbox-uid"
+	labelPodUID                      = "io.kubernetes.pod.uid"
 	kubeletPodsDir                   = "/var/lib/kubelet/pods"
 	kubeletPodDirTarNamePrefix       = "kubelet_pod"
 	sandboxInfoJSONName              = "sandbox_info.json"

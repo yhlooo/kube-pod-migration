@@ -55,7 +55,9 @@ func NewRestoreCommandWithOptions(opts *options.RestoreOptions) *cobra.Command {
 			}
 
 			// 还原到检查点
-			if err := mgr.Restore(ctx, tr); err != nil {
+			if err := mgr.Restore(ctx, tr, podcrcommon.RestoreOptions{
+				PodUID: opts.PodUID,
+			}); err != nil {
 				return err
 			}
 			logger.Info("restored")

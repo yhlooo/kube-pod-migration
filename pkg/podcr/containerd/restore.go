@@ -29,13 +29,15 @@ import (
 	criapis "k8s.io/cri-api/pkg/apis"
 	runtimev1 "k8s.io/cri-api/pkg/apis/runtime/v1"
 
+	"github.com/yhlooo/podmig/pkg/podcr/common"
 	"github.com/yhlooo/podmig/pkg/utils/randutil"
 	"github.com/yhlooo/podmig/pkg/utils/tarutil"
 )
 
 // Restore 从 tr 读取 Pod 检查点并还原 Pod
-func (h *Manager) Restore(ctx context.Context, tr *tar.Reader) error {
+func (h *Manager) Restore(ctx context.Context, tr *tar.Reader, opts common.RestoreOptions) error {
 	return (&Restore{
+		opts:             opts,
 		criClient:        h.criClient,
 		containerdClient: h.containerdClient,
 		tr:               tr,
@@ -44,10 +46,12 @@ func (h *Manager) Restore(ctx context.Context, tr *tar.Reader) error {
 
 // Restore 从 Pod 检查点还原
 type Restore struct {
+	opts             common.RestoreOptions
 	criClient        criapis.RuntimeService
 	containerdClient *containerd.Client
 	tr               *tar.Reader
 
+	srcSandboxUID                string
 	srcSandboxInfo               *SandboxInfo
 	srcContainerCheckpointImages []images.Image
 
@@ -111,9 +115,19 @@ func (r *Restore) importTar(ctx context.Context) error {
 			if err := tarutil.ReadJSON(r.tr, r.srcSandboxInfo); err != nil {
 				return fmt.Errorf("read sandbox config from file %q error: %w", hdr.Name, err)
 			}
+			r.srcSandboxUID = r.srcSandboxInfo.Config.Metadata.Uid
+			if r.opts.PodUID == "" {
+				r.opts.PodUID = r.srcSandboxUID
+			}
+			r.convertPodSandboxConfig() // 转换 Pod 沙盒配置
 		case strings.HasPrefix(hdr.Name, kubeletPodDirTarNamePrefix):
+			if r.srcSandboxUID == "" {
+				return fmt.Errorf("pod sandbox has not been imported yet")
+			}
+
 			// kubelet Pod 数据目录
 			path := strings.TrimPrefix(hdr.Name, kubeletPodDirTarNamePrefix)
+			path = strings.ReplaceAll(path, r.srcSandboxUID, r.opts.PodUID)
 			logger.Info(fmt.Sprintf("importing kubelet pod data file %q ...", path))
 			info := hdr.FileInfo()
 
@@ -236,6 +250,22 @@ func (r *Restore) restoreContainer(ctx context.Context, checkpoint images.Image)
 	return container.ID(), nil
 }
 
+// convertPodSandboxConfig 转换 Pod 沙盒配置
+func (r *Restore) convertPodSandboxConfig() {
+	if r.srcSandboxInfo == nil || r.srcSandboxInfo.Config == nil {
+		return
+	}
+
+	// 替换 Pod UID
+	config := r.srcSandboxInfo.Config
+	config.Metadata.Uid = r.opts.PodUID
+	config.LogDirectory = strings.ReplaceAll(config.LogDirectory, r.srcSandboxUID, r.opts.PodUID)
+	if config.Labels == nil {
+		config.Labels = make(map[string]string)
+	}
+	config.Labels[labelPodUID] = r.opts.PodUID
+}
+
 // convertContainerCheckpointImage 转换容器检查点镜像
 //
 // 因为 Pod 沙盒是重新创建的，进程号、沙盒 ID 等信息发生了变化，因此需要修改检查点中容器配置中对这些信息的引用
@@ -308,11 +338,15 @@ func (r *Restore) convertContainerSpec(ctx context.Context, spec *ociruntime.Spe
 	if spec.Annotations[containerAnnoSandboxID] == r.srcSandboxInfo.ID {
 		spec.Annotations[containerAnnoSandboxID] = r.sandboxInfo.ID
 	}
+	if spec.Annotations[containerAnnoSandboxUID] == r.srcSandboxUID {
+		spec.Annotations[containerAnnoSandboxUID] = r.opts.PodUID
+	}
 	for i, mount := range spec.Mounts {
 		switch mount.Destination {
 		case "/etc/hostname", "/etc/resolv.conf", "/dev/shm":
 			spec.Mounts[i].Source = strings.ReplaceAll(mount.Source, r.srcSandboxInfo.ID, r.sandboxInfo.ID)
 		case "/etc/hosts", "/dev/termination-log", "/var/run/secrets/kubernetes.io/serviceaccount":
+			spec.Mounts[i].Source = strings.ReplaceAll(mount.Source, r.srcSandboxUID, r.opts.PodUID)
 		}
 	}
 	if spec.Linux != nil {
